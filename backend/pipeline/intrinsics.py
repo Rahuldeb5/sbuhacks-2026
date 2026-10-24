@@ -1,6 +1,30 @@
+from __future__ import annotations
+
+import io
 import math
+from dataclasses import dataclass
 
 import numpy as np
+
+from PIL import Image, ImageOps
+
+DEFAULT_HFOV_DEG = 69.0 # guestimate of theta for a 36mm long side with focal length 26 mm
+MAX_LONG_SIDE = 1024
+EXIF_FOCAL_35MM = 0xA405 
+EXIF_IFD = 0x8769
+
+@dataclass
+class Camera:
+    K: np.ndarray   
+    width: int
+    height: int
+    hfov_deg: float 
+    source: str     
+    f35: float | None = None
+
+    @property
+    def fx(self) -> float:
+        return float(self.K[0, 0])
 
 def build_K(width: int, height: int, fov_long_deg: float) -> np.ndarray:
     long_side = max(width, height)
