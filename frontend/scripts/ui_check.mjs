@@ -38,7 +38,7 @@ step('idle page with the assembling placeholder cog')
 
 for (const tag of ['duck', 'bottle']) {
   const t0 = Date.now()
-  await page.setInputFiles('input[type=file]', path.join(DATA, `${tag}.jpeg`))
+  await page.setInputFiles('#photo-file', path.join(DATA, `${tag}.jpeg`))
   await page.waitForSelector('.stage-done img[alt=Depth]', { timeout: 30000 })
   await page.waitForSelector('.controls', { timeout: 60000 })
   const scanMs = Date.now() - t0

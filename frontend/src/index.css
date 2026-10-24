@@ -94,6 +94,10 @@ button, input, select { font: inherit; }
 }
 
 .capture .hint { margin-top: 8px; font-size: 12px; color: var(--ink-dim); }
+.capture-row { display: flex; gap: 8px; }
+/* the camera button only makes sense on touch devices (desktops ignore capture and show the same file picker) */
+.camera-only { display: none; }
+@media (pointer: coarse) { .camera-only { display: inline-flex; } }
 .error { margin-top: 8px; color: #ffb4a0; font-size: 13px; }
 
 /* stage strip */

@@ -52,7 +52,8 @@ export default function App() {
   const methodRef = useRef<Method>('inflate')
   const [notice, setNotice] = useState<{ from: Method; to: Method; text: string } | null>(null)
   const needsThumb = useRef<string | null>(null)        // scan id whose canvas thumbnail is still to be uploaded
-  const fileRef = useRef<HTMLInputElement>(null)
+  const fileRef = useRef<HTMLInputElement>(null)          // photo library / files
+  const cameraRef = useRef<HTMLInputElement>(null)        // straight to the camera (phones)
   const placeholder = useMemo(() => {
     const b = new URLSearchParams(location.search).get('bench')
     return b ? benchPayload(parseInt(b, 10)) : cogPayload()
@@ -298,11 +299,20 @@ export default function App() {
 
           <aside className="side">
             <div className="capture panel">
-              <input ref={fileRef} type="file" accept="image/*" capture="environment" hidden
+              {/* capture="environment" opens the camera directly and hides the photo library on phones, so the
+                  library gets its own input without it */}
+              <input ref={cameraRef} id="photo-camera" type="file" accept="image/*" capture="environment" hidden
                 onChange={(e) => { const f = e.target.files?.[0]; if (f) onFile(f); e.target.value = '' }} />
-              <button className="brass-btn big wide" onClick={() => fileRef.current?.click()} disabled={status === 'scanning'}>
-                {status === 'scanning' ? 'Working…' : '📷 Take / choose photo'}
-              </button>
+              <input ref={fileRef} id="photo-file" type="file" accept="image/*" hidden
+                onChange={(e) => { const f = e.target.files?.[0]; if (f) onFile(f); e.target.value = '' }} />
+              <div className="capture-row">
+                <button className="brass-btn big camera-only" onClick={() => cameraRef.current?.click()} disabled={status === 'scanning'}>
+                  {status === 'scanning' ? 'Working…' : '📷 Take photo'}
+                </button>
+                <button className="brass-btn big" onClick={() => fileRef.current?.click()} disabled={status === 'scanning'}>
+                  {status === 'scanning' ? 'Working…' : '🖼 Choose photo'}
+                </button>
+              </div>
               <div className="hint">or drop an image anywhere · side-on photo, object on a table, calibration plate in view for real measurements</div>
               {error && <div className="error">{error}</div>}
             </div>

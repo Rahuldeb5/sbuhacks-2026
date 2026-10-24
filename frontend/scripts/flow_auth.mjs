@@ -36,7 +36,7 @@ try {
   ap.on('pageerror', (e) => report.console_errors.push(String(e)))
   await ap.goto(BASE + Q)
   await ap.getByRole('button', { name: 'Sign in with Google' }).waitFor()
-  await ap.setInputFiles('input[type=file]', path.join(DATA, 'bottle.jpeg'))
+  await ap.setInputFiles('#photo-file', path.join(DATA, 'bottle.jpeg'))
   await ap.waitForSelector('.savebar', { timeout: 60000 })
   const anonBtn = await ap.locator('.savebar .brass-btn').innerText()
   check(anonBtn === 'Sign in & save', `anonymous save button: ${anonBtn}`)
@@ -58,7 +58,7 @@ try {
   await page.locator('.account-name').waitFor()
   step('signed in', { account: await page.locator('.account-name').innerText() })
 
-  await page.setInputFiles('input[type=file]', path.join(DATA, 'duck.jpeg'))
+  await page.setInputFiles('#photo-file', path.join(DATA, 'duck.jpeg'))
   await page.waitForSelector('.savebar', { timeout: 60000 })
   await page.waitForTimeout(2600)
   const state0 = await page.locator('.save-state').innerText()
