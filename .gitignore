@@ -10,3 +10,4 @@ frontend/dist/
 backend/.env
 backend/data/
 backend/cache/
+backend/scans/

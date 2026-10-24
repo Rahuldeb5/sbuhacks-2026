@@ -58,6 +58,17 @@ def _save(d: Path, p: Perception):
     (d / "camera.json").write_text(json.dumps(_camera_json(p.cam), indent=1))
 
 
+def load_cached(data: bytes, cache_dir: Path = CACHE_DIR, erode_px: int = ERODE_PX) -> Perception | None:
+    """The cached perception for these image bytes, or None (for callers that run the stages themselves)."""
+    key = cache_key(data, erode_px)
+    d = Path(cache_dir) / key
+    return _load(d, key) if (d / "camera.json").exists() else None
+
+
+def store(p: Perception, cache_dir: Path = CACHE_DIR):
+    _save(Path(cache_dir) / p.key, p)
+
+
 def perceive(image: str | Path | bytes, cache_dir: Path | None = CACHE_DIR, erode_px: int = ERODE_PX) -> Perception:
     """Photo -> rgb, camera, raw DA depth, masks. cache_dir=None disables the cache."""
     t0 = time.perf_counter()
