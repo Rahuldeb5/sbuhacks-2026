@@ -46,6 +46,14 @@ for (const tag of ['duck', 'bottle']) {
   await shot(`02_${tag}_auto.png`)
   const auto = (await page.locator('.method-row .active').innerText()).replace('\n', ' ')
   step(`${tag}: scanned via UI`, { scan_ms_wall: scanMs, auto_method: auto, dims: await dims() })
+  if (process.env.VLM === '1') {          // live VLM: the Inspector's notes replace the fallback name
+    await page.waitForSelector('.inspector-name', { timeout: 30000 })
+    await page.waitForTimeout(500)
+    await page.locator('.inspector').scrollIntoViewIfNeeded()
+    await shot(`02b_${tag}_inspector.png`)
+    step(`${tag}: inspector notes`, { name: await page.locator('.inspector-name').innerText(),
+      hud: await page.locator('.hud-title').innerText(), tags: await page.locator('.inspector-tags').innerText() })
+  }
 
   for (const m of ['Mirror', 'Revolve']) {
     const tt = Date.now()

@@ -11,3 +11,6 @@ backend/.env
 backend/data/
 backend/cache/
 backend/scans/
+frontend/ui_shots/
+
+.env

@@ -16,9 +16,12 @@ DATA = Path(__file__).resolve().parents[2] / "data"
 
 @pytest.fixture(scope="module")
 def client(tmp_path_factory):
+    """No VLM here (deterministic, no LM Studio needed): descriptions take the fallback path. See test_vlm.py."""
     app_module.SCANS_DIR = tmp_path_factory.mktemp("scans")
-    with TestClient(app_module.app) as c:
-        yield c
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setenv("VLM_DISABLED", "1")
+        with TestClient(app_module.app) as c:
+            yield c
 
 
 def scan(client, name, stream=False, **form):

@@ -36,6 +36,7 @@ export default function App() {
   const touched = useRef(false)
   const hintApplied = useRef(false)
   const reshapeRef = useRef<((m: Method) => void) | null>(null)
+  const methodRef = useRef<Method>('inflate')
   const [notice, setNotice] = useState<{ from: Method; to: Method; text: string } | null>(null)
   const needsThumb = useRef<string | null>(null)        // scan id whose canvas thumbnail is still to be uploaded
   const fileRef = useRef<HTMLInputElement>(null)
@@ -69,6 +70,9 @@ export default function App() {
           setNotice({ from, to: h.recommended, text: h.hint_effect })
         }
         if (d.status === 'ready' && d.result) setLabel(d.result.name)
+        // the category changed the mirror plane prior: the mirror on screen is stale (the server pre-built the new one)
+        if (d.status === 'ready' && (d.prior_scale ?? 1) !== 1 && methodRef.current === 'mirror' && !hintApplied.current)
+          reshapeRef.current?.('mirror')
         if (d.status === 'pending' && n < 90) timer = window.setTimeout(() => tick(n + 1), 1000)
       } catch {
         if (!stop && n < 90) timer = window.setTimeout(() => tick(n + 1), 2000)
@@ -146,6 +150,7 @@ export default function App() {
   }
 
   reshapeRef.current = (m: Method) => { void reshape(m, thickness) }
+  methodRef.current = method
   const pickMethod = (m: Method) => {
     touched.current = true
     setNotice(null)

@@ -6,7 +6,7 @@ POST /api/shape             {scan_id, method, thickness?, known_dim?, plane_offs
 GET  /api/export/{id}       ?style=blocky|smooth&method=&thickness=&plane_offset_cm=  -> STL download
 GET  /api/scans             recent scans (newest first);  GET /api/scans/{id} reload one
 POST /api/scans/{id}/thumbnail   PNG/JPEG body (canvas snapshot) replaces the server-rendered thumbnail
-GET  /api/scans/{id}/description  async object description (fallback until the VLM is wired in)
+GET  /api/scans/{id}/description  async object description from the VLM (poll until status != pending)
 GET  /api/files/{id}/{f}    photo.jpg / depth.png / mask.png / thumbnail.png
 GET  /api/health
 
@@ -35,20 +35,24 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse, Response, StreamingResponse
 from pydantic import BaseModel
 
+import config
+import vlm
+from gpu_manager import GpuManager
 from pipeline import depth, mesh, segment
 from pipeline.intrinsics import Camera, load_image
 from pipeline.perceive import CACHE_DIR, Perception, cache_key, load_cached, store
 from pipeline.render import render as render_voxels
 from pipeline.run import Scan, mirror_from_scan, mirror_offset_min, scan_from_perception, shape_from_scan, timed
 from pipeline.scale import ScaleInfo, parse_known
-from pipeline.shapes.auto_select import trace_text
+from pipeline.shapes.auto_select import decide, trace_text
+from pipeline.shapes.plane_fit import CATEGORY_PRIOR, CATEGORY_PRIOR_ENABLED
 from pipeline.voxels import VoxelModel
 
 log = logging.getLogger("app")
 SCANS_DIR = Path(__file__).resolve().parent / "scans"
 FILES = {"photo.jpg", "depth.png", "mask.png", "thumbnail.png"}
 METHODS = ("mirror", "revolve", "inflate")
-LABEL_FALLBACK = "Unidentified contraption"
+LABEL_FALLBACK = vlm.FALLBACK_NAME
 THICKNESS_RANGE = (0.25, 2.5)
 MODEL_CACHE_SIZE = 48
 SID_RE = re.compile(r"^\d{8}-\d{6}-[0-9a-f]{6}$")
@@ -79,6 +83,7 @@ STATES_LOCK = threading.Lock()
 MODEL_CACHE: "OrderedDict[tuple, VoxelModel]" = OrderedDict()
 INFLIGHT: dict[tuple, threading.Event] = {}            # model key -> done event (dedupes identical concurrent builds)
 CACHE_LOCK = threading.Lock()
+GPU: GpuManager | None = None
 
 
 @asynccontextmanager
@@ -89,8 +94,15 @@ async def lifespan(app: FastAPI):
     depth.get_model()
     depth.infer(np.zeros((256, 256, 3), np.uint8))    # the first CUDA call is ~1 s; pay it at startup, not on a scan
     segment.segment(np.zeros((64, 64, 3), np.uint8))  # same for onnxruntime's first rembg call
-    log.info("models ready in %.1fs", time.perf_counter() - t)
+    global GPU
+    GPU = GpuManager()
+    if config.vlm_disabled():
+        GPU.loop = asyncio.get_running_loop()           # depth still goes through the GPU lock; no LM Studio calls
+    else:
+        await GPU.startup()                            # coresident: (re)load the VLM with the small settings
+    log.info("models ready in %.1fs (gpu: %s)", time.perf_counter() - t, GPU.status())
     yield
+    await GPU.client.aclose()
 
 
 app = FastAPI(title="Steel & Steam scanner", lifespan=lifespan)
@@ -159,6 +171,8 @@ def get_state(sid: str) -> ScanState:
     p = d / "description.json"
     if p.exists():
         st.description = json.loads(p.read_text())
+        if st.description.get("status") == "pending":   # the server stopped mid-request
+            st.description = {"status": "fallback", "result": vlm.fallback("interrupted by a restart"), "meta": {}}
     with STATES_LOCK:
         return STATES.setdefault(sid, st)
 
@@ -255,7 +269,9 @@ def run_scan(data: bytes, known: dict | None, scale_mode: str, marker_cm: float,
             r = fn(rgb)
             return r, round((time.perf_counter() - t) * 1000, 1)
 
-        fd, fs = POOL.submit(run, depth.infer), POOL.submit(run, segment.segment)   # GPU and CPU side by side
+        # depth holds the GPU lock (never during a VLM load/unload); rembg runs on the CPU side by side
+        infer = (lambda x: GPU.run_depth_sync(depth.infer, x)) if GPU else depth.infer
+        fd, fs = POOL.submit(run, infer), POOL.submit(run, segment.segment)
         Z_raw, tm["depth_ms"] = fd.result()
         cv2.imwrite(str(d / "depth.png"), depth_png(Z_raw))
         emit({"stage": "depth", "url": urls(sid)["depth"], "ms": tm["depth_ms"]})
@@ -299,13 +315,62 @@ def run_scan(data: bytes, known: dict | None, scale_mode: str, marker_cm: float,
     return scan_response(st, method, 1.0, tm, model)
 
 
+def _persist_description(st: ScanState):
+    try:
+        (st.dir / "description.json").write_text(json.dumps(st.description, indent=1, default=str))
+    except OSError:
+        pass
+
+
 def schedule_describe(st: ScanState):
-    """Object name/description, delivered async via /api/scans/{id}/description. The VLM step replaces this
-    fallback with a fire-and-forget call; /api/scan never waits for it."""
-    st.description = {"status": "fallback", "result": {"name": LABEL_FALLBACK, "description": "", "shape_category": "other",
-                                                       "method_explanation": "", "suggested_method": "",
-                                                       "fallback": "vlm not configured"}}
-    (st.dir / "description.json").write_text(json.dumps(st.description, indent=1))
+    """Fire-and-forget VLM description on the server loop; /api/scan never waits for it. The UI polls
+    /api/scans/{id}/description."""
+    if GPU is None or GPU.loop is None or config.vlm_disabled() or not GPU.available:
+        st.description = {"status": "fallback", "result": vlm.fallback("vlm disabled or unavailable"), "meta": {}}
+        _persist_description(st)
+        return
+    st.description = {"status": "pending", "started": time.time()}
+    photo = cv2.cvtColor(st.scan.rgb, cv2.COLOR_RGB2BGR)
+    fut = asyncio.run_coroutine_threadsafe(
+        vlm.describe(GPU, photo, cv2.imread(str(st.dir / "depth.png")), cv2.imread(str(st.dir / "mask.png")),
+                     st.scan.auto), GPU.loop)
+    fut.add_done_callback(lambda f: _store_description(st, f))
+
+
+def _store_description(st: ScanState, fut):
+    try:
+        out = fut.result()
+    except Exception as e:  # noqa: BLE001
+        out = {"result": vlm.fallback(str(e)[:200]), "meta": {}}
+    res = out["result"]
+    st.description = {"status": "fallback" if res.get("fallback") else "ready", **out}
+    _persist_description(st)
+    if res.get("fallback"):
+        return
+    with st.lock:
+        st.meta["label"], st.meta["label_source"] = res["name"], "vlm"
+        # the category only scales the mirror plane's thickness prior (never a number from the VLM itself);
+        # prior_scale is part of the model + mirror-plane cache keys, so the old mirror results simply stop matching
+        scale = CATEGORY_PRIOR.get(res.get("shape_category"), 1.0) if CATEGORY_PRIOR_ENABLED else 1.0
+        rewarm = scale != st.scan.prior_scale
+        st.scan.prior_scale = st.meta["prior_scale"] = scale
+        # the hint may flip a BORDERLINE revolve call, never a failed mirror sanity check; the UI decides whether to
+        # apply it (only if the user hasn't picked a method), here it is recorded and its model pre-built
+        hinted = decide(st.scan.auto["scores"], res.get("shape_category"))
+        st.meta["selection_hint"] = {**hinted, "switch": hinted["recommended"] != st.scan.auto["recommended"]}
+    st.save_meta()
+    if rewarm:
+        POOL.submit(_prebuild, st, "mirror")
+    if st.meta["selection_hint"]["switch"]:
+        POOL.submit(_prebuild, st, hinted["recommended"])
+
+
+def hint_json(h: dict | None) -> dict | None:
+    if not h:
+        return None
+    return {"recommended": h["recommended"], "switch": h["switch"], "reason": h["reason"],
+            "hint": h["selection_trace"]["hint"], "hint_effect": h["selection_trace"]["hint_effect"],
+            "selection_trace": h["selection_trace"]}
 
 
 @app.post("/api/scan")
@@ -467,9 +532,10 @@ def api_file(sid: str, name: str):
 @app.get("/api/scans/{sid}/description")
 def api_description(sid: str):
     st = get_state(sid)
-    return {"scan_id": sid, **st.description, "auto": {k: v for k, v in st.scan.auto.items() if k != "plane"},
-            "prior_scale": st.scan.prior_scale, "selection": selection_json(st.scan.auto),
-            "selection_hint": st.meta.get("selection_hint")}
+    d = {k: v for k, v in st.description.items() if k != "started"}
+    return {"scan_id": sid, **d, "label": st.meta["label"],
+            "auto": {k: v for k, v in st.scan.auto.items() if k != "plane"}, "prior_scale": st.scan.prior_scale,
+            "selection": selection_json(st.scan.auto), "selection_hint": hint_json(st.meta.get("selection_hint"))}
 
 
 @app.get("/api/health")
@@ -477,4 +543,4 @@ def health():
     import torch
     return {"ok": True, "cuda": torch.cuda.is_available(),
             "device": torch.cuda.get_device_name(0) if torch.cuda.is_available() else None,
-            "scans_in_memory": len(STATES), "models_cached": len(MODEL_CACHE)}
+            "scans_in_memory": len(STATES), "models_cached": len(MODEL_CACHE), "gpu": GPU.status() if GPU else None}
