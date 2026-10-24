@@ -30,6 +30,7 @@ const SCALE_TEXT: Record<string, string> = {
 
 interface Props {
   scanId: string
+  fileSig: string
   payload: Payload
   recommended: Method
   selection?: Selection
@@ -148,8 +149,8 @@ export function Controls(p: Props) {
       </form>
 
       <div className="export-row">
-        <a className="brass-btn" href={exportUrl(p.scanId, 'blocky', p.method, t, off)} download>⬇ Blocky STL</a>
-        <a className="brass-btn" href={exportUrl(p.scanId, 'smooth', p.method, t, off)} download>⬇ Smooth STL</a>
+        <a className="brass-btn" href={exportUrl(p.scanId, p.fileSig, 'blocky', p.method, t, off)} download>⬇ Blocky STL</a>
+        <a className="brass-btn" href={exportUrl(p.scanId, p.fileSig, 'smooth', p.method, t, off)} download>⬇ Smooth STL</a>
         <button className="steel-btn" onClick={p.onReplay}>↻ Replay assembly</button>
       </div>
     </div>

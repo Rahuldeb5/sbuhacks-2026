@@ -7,6 +7,9 @@ const proxy = { '/api': { target: 'http://127.0.0.1:8000', changeOrigin: true } 
 
 export default defineConfig({
   plugins: [react()],
+  // the repo-root .env holds both the backend's secret and the browser's VITE_SUPABASE_*; Vite only ever exposes
+  // VITE_-prefixed variables to the bundle, so the secret key cannot leak into it
+  envDir: '..',
   server: { host: true, port: 5173, proxy },
   preview: { host: true, port: 4173, proxy },
 })

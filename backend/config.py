@@ -14,3 +14,12 @@ load_dotenv(BACKEND / ".env")
 def vlm_disabled() -> bool:
     """VLM_DISABLED=1 skips LM Studio entirely (tests, machines without the model); descriptions use the fallback."""
     return os.environ.get("VLM_DISABLED") == "1"
+
+
+SUPABASE_URL = os.environ.get("SUPABASE_URL", "").strip().rstrip("/")
+SUPABASE_KEY = os.environ.get("SUPABASE_KEY", "").strip()      # secret key: backend only, never sent to the browser
+SCANS_BUCKET = os.environ.get("SUPABASE_BUCKET", "scans")
+
+
+def supabase_configured() -> bool:
+    return bool(SUPABASE_URL and SUPABASE_KEY)

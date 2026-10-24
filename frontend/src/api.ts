@@ -1,4 +1,14 @@
+import { accessToken } from './supabase'
+
 export type Method = 'mirror' | 'revolve' | 'inflate'
+
+/** fetch with the signed-in user's access token (if any): scans made or saved while signed in are private. */
+export async function apiFetch(input: string, init: RequestInit = {}) {
+  const t = await accessToken()
+  const headers = new Headers(init.headers)
+  if (t) headers.set('Authorization', `Bearer ${t}`)
+  return fetch(input, { ...init, headers })
+}
 
 export interface Payload {
   voxel_size_mm: number
@@ -56,6 +66,24 @@ export interface ScanResult {
   plane_offset_range: OffsetRange | null
   payload: Payload
   created: string
+  /** signature for <img>/download URLs of this scan (they can't send the Authorization header) */
+  file_sig: string
+  owned: boolean
+  project: { name: string; saved_at: string | null } | null
+}
+
+export interface Project {
+  scan_id: string
+  name: string
+  method: Method
+  thickness: number
+  plane_offset_cm: number
+  known_dim: Record<string, number> | null
+  scale_source: string
+  dims_cm: { w: number; h: number; d: number } | null
+  created_at: string
+  updated_at: string
+  thumbnail: string | null
 }
 
 export interface ShapeResult {
@@ -83,6 +111,7 @@ export interface ScanSummary {
   dims_cm: { w: number; h: number; d: number } | null
   scale_source: string
   thumbnail: string
+  saved: boolean
 }
 
 async function j<T>(r: Response): Promise<T> {
@@ -95,7 +124,7 @@ export async function scanStream(file: File, knownDim: string | null, onEvent: (
   const fd = new FormData()
   fd.append('image', file)
   if (knownDim) fd.append('known_dim', knownDim)
-  const r = await fetch('/api/scan?stream=1', { method: 'POST', body: fd })
+  const r = await apiFetch('/api/scan?stream=1', { method: 'POST', body: fd })
   if (!r.ok || !r.body) throw new Error(`scan failed: ${r.status} ${await r.text()}`)
   const reader = r.body.getReader()
   const dec = new TextDecoder()
@@ -117,22 +146,22 @@ export async function scanStream(file: File, knownDim: string | null, onEvent: (
 export async function shape(scanId: string, method: Method, thickness: number, knownDim?: string | null, planeOffsetCm = 0) {
   const body: Record<string, unknown> = { scan_id: scanId, method, thickness, plane_offset_cm: planeOffsetCm }
   if (knownDim !== undefined) body.known_dim = knownDim ?? ''
-  return j<ShapeResult>(await fetch('/api/shape', {
+  return j<ShapeResult>(await apiFetch('/api/shape', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(body),
   }))
 }
 
-export const listScans = async () => j<ScanSummary[]>(await fetch('/api/scans'))
-export const getScan = async (id: string) => j<ScanResult>(await fetch(`/api/scans/${id}`))
+export const listScans = async () => j<ScanSummary[]>(await apiFetch('/api/scans'))
+export const getScan = async (id: string) => j<ScanResult>(await apiFetch(`/api/scans/${id}`))
 
 export async function postThumbnail(id: string, blob: Blob) {
-  await fetch(`/api/scans/${id}/thumbnail`, { method: 'POST', headers: { 'Content-Type': blob.type || 'image/jpeg' }, body: blob })
+  await apiFetch(`/api/scans/${id}/thumbnail`, { method: 'POST', headers: { 'Content-Type': blob.type || 'image/jpeg' }, body: blob })
 }
 
-export const exportUrl = (id: string, style: 'blocky' | 'smooth', method: string, thickness: number, planeOffsetCm = 0) =>
-  `/api/export/${id}?style=${style}&method=${method}&thickness=${thickness.toFixed(2)}&plane_offset_cm=${planeOffsetCm.toFixed(2)}`
+export const exportUrl = (id: string, sig: string, style: 'blocky' | 'smooth', method: string, thickness: number, planeOffsetCm = 0) =>
+  `/api/export/${id}?style=${style}&method=${method}&thickness=${thickness.toFixed(2)}&plane_offset_cm=${planeOffsetCm.toFixed(2)}&s=${sig}`
 
 export interface Description {
   scan_id: string
@@ -152,4 +181,13 @@ export interface Description {
   selection_hint?: SelectionHint | null
 }
 
-export const getDescription = async (id: string) => j<Description>(await fetch(`/api/scans/${id}/description`))
+export const getDescription = async (id: string) => j<Description>(await apiFetch(`/api/scans/${id}/description`))
+
+export interface SaveBody { scan_id: string; name?: string; method: Method; thickness: number; plane_offset_cm: number }
+const json = (method: string, body: unknown): RequestInit =>
+  ({ method, headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) })
+export const saveProject = async (b: SaveBody) => j<Project>(await apiFetch('/api/projects', json('POST', b)))
+export const listProjects = async () => j<Project[]>(await apiFetch('/api/projects'))
+export const renameProject = async (id: string, name: string) =>
+  j<Project>(await apiFetch(`/api/projects/${id}`, json('PATCH', { name })))
+export const deleteProject = async (id: string) => j<{ ok: boolean }>(await apiFetch(`/api/projects/${id}`, { method: 'DELETE' }))

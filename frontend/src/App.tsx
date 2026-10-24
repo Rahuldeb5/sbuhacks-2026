@@ -1,15 +1,22 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import { getDescription, getScan, postThumbnail, scanStream, shape, type Description, type Method, type OffsetRange, type Payload, type ScanResult } from './api'
+import { getDescription, getScan, postThumbnail, saveProject, scanStream, shape, type Description, type Method, type OffsetRange, type Payload, type ScanResult } from './api'
+import { Account } from './components/Account'
 import { Controls } from './components/Controls'
 import { Gallery } from './components/Gallery'
 import { InspectorNotes } from './components/InspectorNotes'
+import { SaveBar } from './components/SaveBar'
 import { StageStrip, type Stage } from './components/StageStrip'
 import { Viewer } from './components/Viewer'
 import type { ViewMode } from './components/VoxelModel'
 import { benchPayload, cogPayload } from './placeholder'
+import { signInWithGoogle, supabase, userOf, type User } from './supabase'
 
 type Status = 'idle' | 'scanning' | 'ready' | 'error'
 const route = () => (location.hash.startsWith('#/gallery') ? 'gallery' : 'scan')
+// a Save pressed while signed out: kept across the Google sign-in round trip, finished when we're back
+const PENDING_KEY = 'sns_pending_save'
+interface Snap { method: Method; thickness: number; plane_offset_cm: number; known: string; name: string }
+interface PendingSave { scan_id: string; name: string; method: Method; thickness: number; plane_offset_cm: number }
 
 export default function App() {
   const [page, setPage] = useState(route())
@@ -32,6 +39,12 @@ export default function App() {
   const [desc, setDesc] = useState<Description | null>(null)
   const [fps, setFps] = useState(0)
   const [drag, setDrag] = useState(false)
+  const [user, setUser] = useState<User | null>(null)
+  const [authReady, setAuthReady] = useState(!supabase)
+  const [nameDraft, setNameDraft] = useState('')
+  const [saving, setSaving] = useState(false)
+  const [saved, setSaved] = useState<Snap | null>(null)    // what the saved project holds (null = never saved)
+  const pending = useRef<PendingSave | null>(null)
   // the Inspector's hint may switch a borderline auto pick, but only until the user picks a method
   const touched = useRef(false)
   const hintApplied = useRef(false)
@@ -43,6 +56,15 @@ export default function App() {
   const placeholder = useMemo(() => {
     const b = new URLSearchParams(location.search).get('bench')
     return b ? benchPayload(parseInt(b, 10)) : cogPayload()
+  }, [])
+
+  // sign-in state from Supabase (also completes the Google redirect: ?code=... is exchanged by supabase-js)
+  useEffect(() => {
+    if (!supabase) return
+    try { pending.current = JSON.parse(sessionStorage.getItem(PENDING_KEY) || 'null') } catch { pending.current = null }
+    supabase.auth.getSession().then(({ data }) => { setUser(userOf(data.session)); setAuthReady(true) })
+    const { data } = supabase.auth.onAuthStateChange((_e, session) => setUser(userOf(session)))
+    return () => data.subscription.unsubscribe()
   }, [])
 
   useEffect(() => {
@@ -69,7 +91,11 @@ export default function App() {
           reshapeRef.current?.(h.recommended)
           setNotice({ from, to: h.recommended, text: h.hint_effect })
         }
-        if (d.status === 'ready' && d.result) setLabel(d.result.name)
+        if (d.status === 'ready' && d.result) {
+          setLabel(d.result.name)
+          // the VLM name becomes the default project name (only while unsaved and not edited)
+          setNameDraft((cur) => (result.project || (cur && cur !== result.label) ? cur : d.result!.name))
+        }
         // the category changed the mirror plane prior: the mirror on screen is stale (the server pre-built the new one)
         if (d.status === 'ready' && (d.prior_scale ?? 1) !== 1 && methodRef.current === 'mirror' && !hintApplied.current)
           reshapeRef.current?.('mirror')
@@ -96,11 +122,14 @@ export default function App() {
     setOffsetRange(r.plane_offset_range)
     setLabel(r.label)
     setKnownDim(r.known_dim)
+    setNameDraft(r.project?.name ?? r.label)
+    setSaved(r.project ? { method: r.method, thickness: r.thickness, plane_offset_cm: r.plane_offset_cm ?? 0,
+      known: JSON.stringify(r.known_dim ?? null), name: r.project.name } : null)
     setStages({
       photo: { key: 'photo', title: 'Photo', url: r.urls.photo, ms: r.timings.load_ms ?? 0 },
       depth: { key: 'depth', title: 'Depth', url: r.urls.depth, ms: r.timings.depth_ms ?? 0 },
       mask: { key: 'mask', title: 'Mask', url: r.urls.mask, ms: r.timings.segment_ms ?? 0 },
-      model: { key: 'model', title: 'Model', url: `${r.urls.thumbnail}?v=${r.scan_id}`, ms: Object.entries(r.timings).filter(([k]) => k.startsWith('shape_') || k === 'voxel_cleanup_ms').reduce((a, [, v]) => a + v, 0) },
+      model: { key: 'model', title: 'Model', url: `${r.urls.thumbnail}&v=${r.scan_id}`, ms: Object.entries(r.timings).filter(([k]) => k.startsWith('shape_') || k === 'voxel_cleanup_ms').reduce((a, [, v]) => a + v, 0) },
     })
     setStatus('ready')
     setAnimKey((k) => k + 1)
@@ -178,6 +207,64 @@ export default function App() {
     }
   }
 
+  const doSave = async (name: string, override?: PendingSave) => {
+    if (!result) return
+    const st: PendingSave = override ?? { scan_id: result.scan_id, name, method, thickness, plane_offset_cm: planeOffset }
+    if (!user) {
+      // remember what to save, sign in with Google, finish this save for the same scan when we're back
+      sessionStorage.setItem(PENDING_KEY, JSON.stringify(st))
+      await signInWithGoogle()
+      return
+    }
+    setSaving(true)
+    setError(null)
+    try {
+      const p = await saveProject({ scan_id: st.scan_id, name: st.name || undefined, method: st.method,
+        thickness: st.thickness, plane_offset_cm: st.plane_offset_cm })
+      setNameDraft(p.name)
+      setSaved({ method: p.method, thickness: p.thickness, plane_offset_cm: p.plane_offset_cm,
+        known: JSON.stringify(p.known_dim ?? null), name: p.name })
+      setResult((r) => (r && r.scan_id === p.scan_id ? { ...r, owned: true, project: { name: p.name, saved_at: p.updated_at } } : r))
+    } catch (err) {
+      setError(String(err))
+    } finally {
+      setSaving(false)
+    }
+  }
+
+  // back from sign-in with a pending save: reopen that scan, then complete the save
+  useEffect(() => {
+    const p = pending.current
+    if (!p || !user) return
+    if (result?.scan_id !== p.scan_id) {
+      if (status !== 'scanning') openScan(p.scan_id)
+      return
+    }
+    if (status === 'ready') {
+      pending.current = null
+      sessionStorage.removeItem(PENDING_KEY)
+      doSave(p.name, p)
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [user, status, result])
+
+  // signing out (or switching user) must not leave a private scan on screen
+  const lastUid = useRef<string | null | undefined>(undefined)
+  useEffect(() => {
+    if (!authReady) return
+    const uid = user?.id ?? null
+    if (lastUid.current && lastUid.current !== uid && result?.owned) {
+      setResult(null); setPayload(null); setDesc(null); setStages({}); setLabel(null); setSaved(null)
+      setStatus('idle')
+    }
+    lastUid.current = uid
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [user, authReady])
+
+  const dirty = !!saved && (saved.method !== method || nameDraft.trim() !== saved.name ||
+    (method === 'mirror' ? Math.abs(saved.plane_offset_cm - planeOffset) > 1e-6 : Math.abs(saved.thickness - thickness) > 1e-6) ||
+    saved.known !== JSON.stringify(knownDim ?? null))
+
   const shown = payload ?? placeholder
   return (
     <div className={`app ${drag ? 'dragging' : ''}`}
@@ -189,11 +276,12 @@ export default function App() {
         <nav>
           <a href="#/" className={page === 'scan' ? 'active' : ''}>Workshop</a>
           <a href="#/gallery" className={page === 'gallery' ? 'active' : ''}>Archive</a>
+          <Account user={user} />
         </nav>
       </header>
 
       {page === 'gallery' ? (
-        <Gallery onOpen={openScan} />
+        <Gallery user={user} onOpen={openScan} />
       ) : (
         <main className="workshop">
           <section className="viewer-wrap panel">
@@ -219,6 +307,10 @@ export default function App() {
               {error && <div className="error">{error}</div>}
             </div>
             <StageStrip stages={stages} active={status === 'scanning'} />
+            {result && payload && supabase && (
+              <SaveBar saved={!!saved} name={nameDraft} dirty={dirty} busy={saving} signedIn={!!user}
+                onSave={() => doSave(nameDraft.trim())} onNameChange={setNameDraft} />
+            )}
             {notice && (
               <div className="inspector-notice panel" role="status">
                 <span>Inspector recommends <b>{notice.to[0].toUpperCase() + notice.to.slice(1)}</b>
@@ -227,7 +319,7 @@ export default function App() {
               </div>
             )}
             {result && payload && (
-              <Controls scanId={result.scan_id} payload={payload} recommended={notice ? notice.to : result.recommended}
+              <Controls scanId={result.scan_id} fileSig={result.file_sig} payload={payload} recommended={notice ? notice.to : result.recommended}
                 selection={result.selection} method={method}
                 thickness={thickness} planeOffset={planeOffset} offsetRange={offsetRange}
                 showGuide={showGuide} mode={mode} busy={busy} knownDim={knownDim}
