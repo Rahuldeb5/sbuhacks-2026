@@ -85,3 +85,57 @@ def test_mirror_v2_front_never_moves():
     fb = {tuple(np.round(q, 4)) for q in b.front_points}
     assert fa <= fb
     assert b.occ.sum() > a.occ.sum()
+
+
+# revolve under camera tilt, perfect depth, camera-frame grid: prep results/revolve_tilt/results.json (reproduced
+# axisup = no marker (up from the fitted axis); marker+clip = marker up vector + table clip.
+REVOLVE_TILT = {(0, "axisup"): 0.957, (10, "axisup"): 0.933, (20, "axisup"): 0.889, (30, "axisup"): 0.842,
+                (20, "v1"): 0.765, (20, "marker+clip"): 0.981, (30, "marker+clip"): 0.978}
+
+
+@pytest.mark.parametrize("elev,mode", list(REVOLVE_TILT))
+def test_revolve_tilt(elev, mode):
+    from pipeline.run import clip_below_table
+    from pipeline.scale import apply_marker
+    from pipeline.voxels import cleanup
+    from .metrics import iou
+    gt = get_gt("bottle", float(elev), 0.0, table=True)
+    r = gt.r
+    ex = {"mask_full": gt.mask_full, "revolve_mode": "world" if mode == "marker+clip" else mode}
+    mk = None
+    if mode == "marker+clip":
+        Zt = np.where(r.mask | np.isfinite(r.Z_table), np.where(r.mask, r.Z, r.Z_table), 0).astype(np.float32)
+        mk = apply_marker(r.rgb, Zt, r.K, gt.mask_full, 6.0, "exif")    # pose (up, table) from the card corners
+        up_true = r.R @ np.array([0, 1.0, 0])
+        assert np.degrees(np.arccos(np.clip(mk[2].up_cam @ up_true, -1, 1))) < 0.25
+        ex["up_cam"] = mk[2].up_cam
+    res = METHODS["revolve"](gt.Z, gt.mask, r.K, r.rgb, ex)
+    if mk:
+        clip_below_table(res, *mk[2].table)
+    occ, _, _ = cleanup(res.occ, res.colors)
+    assert abs(iou(occ, res.grid, gt.occ, gt.grid) - REVOLVE_TILT[(elev, mode)]) < 0.03
+
+
+def test_revolve_watertight_in_axisup_frame():
+    """The app always passes a world frame; axisup then swaps in its own up -> the bottle comes out standing."""
+    from pipeline.run import run_shape
+    from pipeline.scale import LEVEL_UP, world_from_cam
+    gt = get_gt("bottle", 20.0, 0.0, table=True)
+    res, model = run_shape(gt.Z, gt.mask, gt.mask_full, gt.r.K, gt.r.rgb, "revolve", frame_R=world_from_cam(LEVEL_UP))
+    assert res.debug["revolve_mode"] == "axisup" and mesh.blocky_mesh(model).is_watertight
+    w, h, d = (model.measurements_cm[k] for k in "whd")
+    assert abs(h - 24.0) < 2.5 and abs(w - 6.8) < 0.8 and abs(d - 6.8) < 0.8   # standing, not leaning 20 deg
+
+
+def test_mirror_oracle_plane_duck():
+    """prep test_phantom: with the TRUE symmetry plane, mirror v2 reconstructs the duck (> 0.85)."""
+    gt = get_gt("duck")
+    res = METHODS["mirror"](gt.Z, gt.mask, gt.r.K, gt.r.rgb, {"mask_full": gt.mask_full, "plane": gt.oracle_midplane()})
+    assert evaluate(gt, res)["iou"] > 0.85
+
+
+@pytest.mark.parametrize("method", ["mirror", "revolve", "inflate"])
+def test_all_methods_watertight_duck(method):
+    gt = get_gt("duck")
+    o = evaluate(gt, METHODS[method](gt.Z, gt.mask, gt.r.K, gt.r.rgb, {"mask_full": gt.mask_full}))
+    assert o["blocky_watertight"] and o["smooth_watertight"]
