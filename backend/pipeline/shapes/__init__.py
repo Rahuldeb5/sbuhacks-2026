@@ -6,5 +6,6 @@ Common signature: fn(Z_f, mask, K, rgb, params) -> ShapeResult
 """
 from .common import Grid, ShapeResult  # noqa: F401
 from .inflate import inflate
+from .mirror_v2 import mirror_v2
 
-METHODS = {"inflate": inflate}
+METHODS = {"mirror": mirror_v2, "inflate": inflate}

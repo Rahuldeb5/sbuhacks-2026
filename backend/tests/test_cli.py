@@ -38,3 +38,16 @@ def test_reshape_under_1s():
     t = time.perf_counter()
     shape_from_perception(p, "inflate", 1.5)
     assert time.perf_counter() - t < 1.0
+
+
+@pytest.mark.parametrize("name,dh", [("duck", 0.48), ("bottle", 0.29)])
+def test_cli_mirror_real(name, dh, tmp_path, monkeypatch):
+    """Real photos with mirror v2 at the auto plane: exactly symmetric, watertight, and as thin as prep found it
+    (duck D/H 0.48: prep "D 3.0 at h=6", the known too-shallow default plane; bottle 0.29, prep 8.3/28)."""
+    monkeypatch.setattr(cli, "RUNS", tmp_path)
+    out = cli.main(["--image", str(DATA / f"{name}.jpeg"), "--method", "mirror", "--out", name])
+    meta = json.loads((out / "meta.json").read_text())
+    assert meta["self_symmetry_iou"] > 0.97 and meta["blocky"]["watertight"] and meta["smooth"]["watertight"]
+    assert meta["plane"] is not None
+    m = meta["measurements_cm"]
+    assert abs(m["d"] / m["h"] - dh) < 0.05
