@@ -12,6 +12,8 @@ GET  /api/me                the signed-in user (or null)
 POST /api/projects          save (sign-in required): scan folder -> Supabase Storage, row -> projects table
 GET  /api/projects          your saved projects;  PATCH/DELETE /api/projects/{scan_id}  rename / delete
 GET  /api/health
+everything else             the built frontend (frontend/dist, `npm run build`): one port for the app + API, so a
+                            single tunnel (ngrok http 8000) serves it all
 
 Sign-in: Supabase (Google). The browser sends `Authorization: Bearer <access token>`; supa.verify checks it locally.
 A scan made while signed in, or saved, belongs to that user: anyone else gets 404. Anonymous drafts are open to
@@ -43,6 +45,7 @@ import numpy as np
 from fastapi import FastAPI, File, Form, HTTPException, Query, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse, Response, StreamingResponse
+from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
 import config
@@ -61,6 +64,7 @@ from pipeline.voxels import VoxelModel
 
 log = logging.getLogger("app")
 SCANS_DIR = Path(__file__).resolve().parent / "scans"
+DIST = Path(__file__).resolve().parent.parent / "frontend" / "dist"
 FILES = {"photo.jpg", "depth.png", "mask.png", "thumbnail.png"}
 METHODS = ("mirror", "revolve", "inflate")
 LABEL_FALLBACK = vlm.FALLBACK_NAME
@@ -122,7 +126,7 @@ async def lifespan(app: FastAPI):
     await GPU.client.aclose()
 
 
-app = FastAPI(title="Steel & Steam scanner", lifespan=lifespan)
+app = FastAPI(title="Brassprint", lifespan=lifespan)
 app.add_middleware(CORSMiddleware, allow_origin_regex=r"https?://[^/]+:(5173|4173)$|https?://(localhost|127\.0\.0\.1)(:\d+)?$",
                    allow_methods=["*"], allow_headers=["*"])
 
@@ -735,3 +739,18 @@ def api_delete(sid: str, request: Request):
             MODEL_CACHE.pop(k, None)
     shutil.rmtree(SCANS_DIR / sid, ignore_errors=True)
     return {"ok": True}
+
+
+# ------------------------------------------------------------------ the built frontend (registered last: /api wins)
+if (DIST / "index.html").exists():
+    # hashed bundle names never change content: cache them for good; index.html must always be re-fetched
+    app.mount("/assets", StaticFiles(directory=DIST / "assets"), name="assets")
+
+    @app.get("/{path:path}", include_in_schema=False)
+    def spa(path: str):
+        if path.startswith("api/"):
+            raise HTTPException(404)
+        f = (DIST / path).resolve()
+        if path and f.is_file() and f.is_relative_to(DIST):
+            return FileResponse(f)
+        return FileResponse(DIST / "index.html", headers={"Cache-Control": "no-cache"})

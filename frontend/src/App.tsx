@@ -272,7 +272,7 @@ export default function App() {
       onDragLeave={() => setDrag(false)}
       onDrop={(e) => { e.preventDefault(); setDrag(false); const f = e.dataTransfer.files[0]; if (f) onFile(f) }}>
       <header className="topbar panel">
-        <h1>⚙ Steel &amp; Steam <span>one-photo voxel foundry</span></h1>
+        <h1>⚙ Brassprint <span>one-photo voxel foundry</span></h1>
         <nav>
           <a href="#/" className={page === 'scan' ? 'active' : ''}>Workshop</a>
           <a href="#/gallery" className={page === 'gallery' ? 'active' : ''}>Archive</a>
